@@ -1,14 +1,23 @@
-// Lazy-import version to prevent build-time evaluation of heavy libs
 import { NextRequest, NextResponse } from "next/server";
 
+// Ensure Node runtime (not Edge)
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+/** Basic stopwords to reduce noise */
+const STOP = new Set([
+  "the","a","an","and","or","for","to","of","in","on","with","by","at","as","is","are","was","were","be",
+  "this","that","these","those","from","it","its","we","you","they","their","our","your","but","not","will",
+  "can","may","should","would","could","if","then","than","so","such","into","over","under","about","across"
+]);
+
+/** Expandable skills dictionary (helps evidence & weighting) */
 const defaultSkills = [
-  "javascript","typescript","react","node","next.js","python","java","c++","sql","nosql","aws","gcp","azure",
-  "docker","kubernetes","ci/cd","ml","nlp","tensorflow","pytorch","golang","ruby","php","html","css","tailwind",
-  "jira","git","agile","scrum","kafka","spark","hadoop","linux","bash","rest","graphql","microservices"
+  "javascript","typescript","react","node","next.js","python","java","c++","c#","sql","nosql","mongodb","postgres","mysql",
+  "aws","gcp","azure","docker","kubernetes","ci/cd","jenkins","github actions","ml","nlp","tensorflow","pytorch",
+  "golang","ruby","php","html","css","tailwind","jira","git","agile","scrum","kafka","spark","hadoop","linux","bash",
+  "rest","graphql","microservices","terraform","ansible"
 ];
 
 function tokenize(text: string) {
@@ -19,31 +28,63 @@ function tokenize(text: string) {
     .filter(Boolean);
 }
 
+function keywords(tokens: string[], minLen = 2) {
+  return tokens.filter(t => t.length >= minLen && !STOP.has(t));
+}
+
+function bag(tokens: string[]) {
+  const m = new Map<string, number>();
+  for (const t of tokens) m.set(t, (m.get(t) || 0) + 1);
+  return m;
+}
+
+function dot(a: Map<string, number>, b: Map<string, number>) {
+  let s = 0;
+  for (const [k, va] of a) {
+    const vb = b.get(k);
+    if (vb) s += va * vb;
+  }
+  return s;
+}
+
+function norm(a: Map<string, number>) {
+  let s = 0;
+  for (const [, v] of a) s += v * v;
+  return Math.sqrt(s) || 1;
+}
+
+function cosineSim(a: Map<string, number>, b: Map<string, number>) {
+  return dot(a, b) / (norm(a) * norm(b));
+}
+
 function estimateYears(text: string) {
-  const m = text.match(/(\d+)(\+)?\s*(?:years|yrs)/i);
+  const m = text.match(/(\d+)\s*(\+)?\s*(?:years|yrs)\b/i);
   return m ? (m[0]) : "—";
 }
 
 function detectEducation(text: string) {
   const t = text.toLowerCase();
   if (t.includes("phd") || t.includes("doctor of philosophy")) return "PhD";
-  if (t.includes("master of") || t.includes("msc") || t.includes("m.s.") || t.includes("m.tech")) return "Master's";
-  if (t.includes("bachelor of") || t.includes("bsc") || t.includes("b.e.") || t.includes("b.tech")) return "Bachelor's";
+  if (t.includes("master of") || t.includes("msc") || t.includes("m.s.") || t.includes("mtech") || t.includes("m.tech")) return "Master's";
+  if (t.includes("bachelor of") || t.includes("bsc") || t.includes("b.e.") || t.includes("btech") || t.includes("b.tech")) return "Bachelor's";
   return "—";
 }
 
 function snippet(text: string, jdTokens: string[]) {
-  const idx = jdTokens.findIndex(k => text.toLowerCase().includes(k));
-  if (idx === -1) return text.slice(0, 200) + (text.length > 200 ? "..." : "");
-  const key = jdTokens[idx];
-  const pos = text.toLowerCase().indexOf(key);
-  const start = Math.max(0, pos - 80);
-  const end = Math.min(text.length, pos + 120);
-  return text.slice(start, end) + (end < text.length ? "...": "");
+  const lower = text.toLowerCase();
+  for (const k of jdTokens) {
+    const pos = lower.indexOf(k);
+    if (pos >= 0) {
+      const start = Math.max(0, pos - 80);
+      const end = Math.min(text.length, pos + 120);
+      return text.slice(start, end) + (end < text.length ? "..." : "");
+    }
+  }
+  return text.slice(0, 200) + (text.length > 200 ? "..." : "");
 }
 
+/** Parse buffer to text using dynamic imports (avoid build-time fs reads) */
 async function bufferToText(filename: string, buf: Buffer): Promise<string> {
-  // Dynamic imports so nothing runs at build-time
   const { fileTypeFromBuffer } = await import("file-type");
   const ft = await fileTypeFromBuffer(buf);
   const mime = ft?.mime || "";
@@ -80,36 +121,59 @@ async function bufferToText(filename: string, buf: Buffer): Promise<string> {
   }
 }
 
-function scoreResume(jd: string, resumeText: string) {
-  const jdTokens = tokenize(jd);
-  const rTokens = tokenize(resumeText);
+/** Scoring:
+ *  - Overlap on keywords between JD & resume
+ *  - Cosine similarity of token bags
+ *  - Skill hits bonus
+ */
+function scoreResume(jdText: string, resumeText: string) {
+  const jdTokensAll = tokenize(jdText);
+  const rTokensAll  = tokenize(resumeText);
 
-  const jdSet = new Set(jdTokens);
-  const rSet = new Set(rTokens);
+  const jdKeys = keywords(jdTokensAll, 3);
+  const rKeys  = keywords(rTokensAll, 3);
+
+  const jdSet = new Set(jdKeys);
+  const rSet  = new Set(rKeys);
 
   const overlap = [...jdSet].filter(t => rSet.has(t));
-  const skillHits = defaultSkills.filter(s => rSet.has(s));
-
   const overlapScore = overlap.length / Math.max(1, jdSet.size);
-  const skillScore = skillHits.length / Math.max(3, defaultSkills.length * 0.5);
 
-  const finalScore = Math.min(1, 0.65 * overlapScore + 0.35 * skillScore);
+  const jdBag = bag(jdKeys);
+  const rBag  = bag(rKeys);
+  const cosine = cosineSim(jdBag, rBag);  // 0..1
+
+  const skillHits = defaultSkills.filter(s => rTokensAll.includes(s));
+  const skillScore = Math.min(1, skillHits.length / 10); // up to 10 skills count fully
+
+  // Weighted final score (tweakable)
+  const finalScore = Math.min(1, 0.5 * overlapScore + 0.35 * cosine + 0.15 * skillScore);
 
   return {
     score: finalScore,
     evidence: [...new Set([...overlap.slice(0,6), ...skillHits.slice(0,6)])].slice(0,8),
     experience: estimateYears(resumeText),
     education: detectEducation(resumeText),
-    snippet: snippet(resumeText, jdTokens),
+    snippet: snippet(resumeText, jdKeys),
   };
 }
 
 export async function POST(req: NextRequest) {
   const form = await req.formData();
-  const jd = (form.get("jd") || "").toString();
+
+  // Either raw JD text or a JD file
+  let jdText = (form.get("jd") || "").toString();
+  const jdFile = form.get("jdFile") as File | null;
+
+  if (!jdText && jdFile) {
+    const arrayBuf = await jdFile.arrayBuffer();
+    const buf = Buffer.from(arrayBuf);
+    jdText = await bufferToText(jdFile.name, buf);
+  }
+
   const files = form.getAll("resumes").filter(Boolean) as File[];
-  if (!jd || files.length === 0) {
-    return NextResponse.json({ error: "Missing job description or resumes" }, { status: 400 });
+  if ((!jdText || jdText.trim().length === 0) || files.length === 0) {
+    return NextResponse.json({ error: "Missing job description (text or file) or resumes." }, { status: 400 });
   }
 
   const results: any[] = [];
@@ -117,7 +181,8 @@ export async function POST(req: NextRequest) {
     const arrayBuf = await f.arrayBuffer();
     const buf = Buffer.from(arrayBuf);
     const text = await bufferToText(f.name, buf);
-    const s = scoreResume(jd, text || "");
+
+    const s = scoreResume(jdText, text || "");
     results.push({ filename: f.name, ...s });
   }
 
