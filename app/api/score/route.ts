@@ -1,6 +1,7 @@
+// app/api/score/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
-// Ensure Node runtime (not Edge)
+// Ensure Node runtime (not Edge) for pdf/docx parsing
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -28,7 +29,7 @@ function tokenize(text: string) {
     .filter(Boolean);
 }
 
-function keywords(tokens: string[], minLen = 2) {
+function keywords(tokens: string[], minLen = 3) {
   return tokens.filter(t => t.length >= minLen && !STOP.has(t));
 }
 
@@ -59,7 +60,7 @@ function cosineSim(a: Map<string, number>, b: Map<string, number>) {
 
 function estimateYears(text: string) {
   const m = text.match(/(\d+)\s*(\+)?\s*(?:years|yrs)\b/i);
-  return m ? (m[0]) : "—";
+  return m ? m[0] : "—";
 }
 
 function detectEducation(text: string) {
@@ -158,34 +159,53 @@ function scoreResume(jdText: string, resumeText: string) {
   };
 }
 
+/** POST: accepts JD text or file (jdFile) + multiple resumes ("resumes") */
 export async function POST(req: NextRequest) {
-  const form = await req.formData();
+  try {
+    const form = await req.formData();
 
-  // Either raw JD text or a JD file
-  let jdText = (form.get("jd") || "").toString();
-  const jdFile = form.get("jdFile") as File | null;
+    // JD can be pasted or uploaded as a file
+    let jdText = (form.get("jd") || "").toString();
+    const jdFile = form.get("jdFile") as File | null;
 
-  if (!jdText && jdFile) {
-    const arrayBuf = await jdFile.arrayBuffer();
-    const buf = Buffer.from(arrayBuf);
-    jdText = await bufferToText(jdFile.name, buf);
+    if ((!jdText || jdText.trim().length === 0) && jdFile) {
+      const arrayBuf = await jdFile.arrayBuffer();
+      const buf = Buffer.from(arrayBuf);
+      jdText = await bufferToText(jdFile.name, buf);
+    }
+
+    const files = form.getAll("resumes").filter(Boolean) as File[];
+    if ((!jdText || jdText.trim().length === 0) || files.length === 0) {
+      return NextResponse.json(
+        { error: "Missing job description (text or file) or resumes." },
+        { status: 400 }
+      );
+    }
+
+    const results: any[] = [];
+    for (const f of files) {
+      const arrayBuf = await f.arrayBuffer();
+      const buf = Buffer.from(arrayBuf);
+      const text = await bufferToText(f.name, buf);
+
+      const s = scoreResume(jdText, text || "");
+      results.push({ filename: f.name, ...s });
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return NextResponse.json({ results });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err?.message || "Unexpected error" },
+      { status: 500 }
+    );
   }
+}
 
-  const files = form.getAll("resumes").filter(Boolean) as File[];
-  if ((!jdText || jdText.trim().length === 0) || files.length === 0) {
-    return NextResponse.json({ error: "Missing job description (text or file) or resumes." }, { status: 400 });
-  }
-
-  const results: any[] = [];
-  for (const f of files) {
-    const arrayBuf = await f.arrayBuffer();
-    const buf = Buffer.from(arrayBuf);
-    const text = await bufferToText(f.name, buf);
-
-    const s = scoreResume(jdText, text || "");
-    results.push({ filename: f.name, ...s });
-  }
-
-  results.sort((a, b) => b.score - a.score);
-  return NextResponse.json({ results });
+/** GET: simple health check so /api/score works in the browser */
+export async function GET() {
+  return new Response("score API OK", {
+    status: 200,
+    headers: { "Content-Type": "text/plain" },
+  });
 }
