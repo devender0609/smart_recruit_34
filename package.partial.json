@@ -1,0 +1,11 @@
+{
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "devDependencies_merge_hint": {
+    "typescript": "5.6.2",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "@types/node": "20.14.9"
+  }
+}
