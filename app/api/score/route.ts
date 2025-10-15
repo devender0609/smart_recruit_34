@@ -1,7 +1,5 @@
+// Lazy-import version to prevent build-time evaluation of heavy libs
 import { NextRequest, NextResponse } from "next/server";
-import * as mammoth from "mammoth";
-import pdf from "pdf-parse";
-import { fileTypeFromBuffer } from "file-type";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,29 +39,40 @@ function snippet(text: string, jdTokens: string[]) {
   const pos = text.toLowerCase().indexOf(key);
   const start = Math.max(0, pos - 80);
   const end = Math.min(text.length, pos + 120);
-  return text.slice(start, end) + (end < text.length ? "..." : "");
+  return text.slice(start, end) + (end < text.length ? "...": "");
 }
 
 async function bufferToText(filename: string, buf: Buffer): Promise<string> {
+  // Dynamic imports so nothing runs at build-time
+  const { fileTypeFromBuffer } = await import("file-type");
   const ft = await fileTypeFromBuffer(buf);
   const mime = ft?.mime || "";
+
   if (mime.includes("pdf") || filename.toLowerCase().endsWith(".pdf")) {
     try {
+      const mod = await import("pdf-parse");
+      const pdf = (mod as any).default || (mod as any);
       const data = await pdf(buf);
       return data.text || "";
     } catch {
       return "";
     }
   }
-  if (mime.includes("officedocument.wordprocessingml.document") || filename.toLowerCase().endsWith(".docx")) {
+
+  if (
+    mime.includes("officedocument.wordprocessingml.document") ||
+    filename.toLowerCase().endsWith(".docx")
+  ) {
     try {
+      const mammoth = await import("mammoth");
       const res = await (mammoth as any).extractRawText({ buffer: buf });
       return res.value || "";
     } catch {
       return "";
     }
   }
-  // Fallback to text
+
+  // Fallback to UTF-8 text
   try {
     return new TextDecoder().decode(buf);
   } catch {
