@@ -1,19 +1,15 @@
-// app/api/score/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
-// Ensure Node runtime (not Edge) for pdf/docx parsing
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-/** Basic stopwords to reduce noise */
 const STOP = new Set([
   "the","a","an","and","or","for","to","of","in","on","with","by","at","as","is","are","was","were","be",
   "this","that","these","those","from","it","its","we","you","they","their","our","your","but","not","will",
   "can","may","should","would","could","if","then","than","so","such","into","over","under","about","across"
 ]);
 
-/** Expandable skills dictionary (helps evidence & weighting) */
 const defaultSkills = [
   "javascript","typescript","react","node","next.js","python","java","c++","c#","sql","nosql","mongodb","postgres","mysql",
   "aws","gcp","azure","docker","kubernetes","ci/cd","jenkins","github actions","ml","nlp","tensorflow","pytorch",
@@ -47,13 +43,11 @@ function dot(a: Map<string, number>, b: Map<string, number>) {
   }
   return s;
 }
-
 function norm(a: Map<string, number>) {
   let s = 0;
   for (const [, v] of a) s += v * v;
   return Math.sqrt(s) || 1;
 }
-
 function cosineSim(a: Map<string, number>, b: Map<string, number>) {
   return dot(a, b) / (norm(a) * norm(b));
 }
@@ -62,7 +56,6 @@ function estimateYears(text: string) {
   const m = text.match(/(\d+)\s*(\+)?\s*(?:years|yrs)\b/i);
   return m ? m[0] : "—";
 }
-
 function detectEducation(text: string) {
   const t = text.toLowerCase();
   if (t.includes("phd") || t.includes("doctor of philosophy")) return "PhD";
@@ -70,7 +63,6 @@ function detectEducation(text: string) {
   if (t.includes("bachelor of") || t.includes("bsc") || t.includes("b.e.") || t.includes("btech") || t.includes("b.tech")) return "Bachelor's";
   return "—";
 }
-
 function snippet(text: string, jdTokens: string[]) {
   const lower = text.toLowerCase();
   for (const k of jdTokens) {
@@ -84,7 +76,7 @@ function snippet(text: string, jdTokens: string[]) {
   return text.slice(0, 200) + (text.length > 200 ? "..." : "");
 }
 
-/** Parse buffer to text using dynamic imports (avoid build-time fs reads) */
+/** Dynamic imports so nothing runs at build time */
 async function bufferToText(filename: string, buf: Buffer): Promise<string> {
   const { fileTypeFromBuffer } = await import("file-type");
   const ft = await fileTypeFromBuffer(buf);
@@ -115,18 +107,9 @@ async function bufferToText(filename: string, buf: Buffer): Promise<string> {
   }
 
   // Fallback to UTF-8 text
-  try {
-    return new TextDecoder().decode(buf);
-  } catch {
-    return "";
-  }
+  try { return new TextDecoder().decode(buf); } catch { return ""; }
 }
 
-/** Scoring:
- *  - Overlap on keywords between JD & resume
- *  - Cosine similarity of token bags
- *  - Skill hits bonus
- */
 function scoreResume(jdText: string, resumeText: string) {
   const jdTokensAll = tokenize(jdText);
   const rTokensAll  = tokenize(resumeText);
@@ -142,12 +125,11 @@ function scoreResume(jdText: string, resumeText: string) {
 
   const jdBag = bag(jdKeys);
   const rBag  = bag(rKeys);
-  const cosine = cosineSim(jdBag, rBag);  // 0..1
+  const cosine = cosineSim(jdBag, rBag);
 
   const skillHits = defaultSkills.filter(s => rTokensAll.includes(s));
-  const skillScore = Math.min(1, skillHits.length / 10); // up to 10 skills count fully
+  const skillScore = Math.min(1, skillHits.length / 10);
 
-  // Weighted final score (tweakable)
   const finalScore = Math.min(1, 0.5 * overlapScore + 0.35 * cosine + 0.15 * skillScore);
 
   return {
@@ -159,7 +141,6 @@ function scoreResume(jdText: string, resumeText: string) {
   };
 }
 
-/** POST: accepts JD text or file (jdFile) + multiple resumes ("resumes") */
 export async function POST(req: NextRequest) {
   try {
     const form = await req.formData();
@@ -167,7 +148,6 @@ export async function POST(req: NextRequest) {
     // JD can be pasted or uploaded as a file
     let jdText = (form.get("jd") || "").toString();
     const jdFile = form.get("jdFile") as File | null;
-
     if ((!jdText || jdText.trim().length === 0) && jdFile) {
       const arrayBuf = await jdFile.arrayBuffer();
       const buf = Buffer.from(arrayBuf);
@@ -176,10 +156,7 @@ export async function POST(req: NextRequest) {
 
     const files = form.getAll("resumes").filter(Boolean) as File[];
     if ((!jdText || jdText.trim().length === 0) || files.length === 0) {
-      return NextResponse.json(
-        { error: "Missing job description (text or file) or resumes." },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing job description (text or file) or resumes." }, { status: 400 });
     }
 
     const results: any[] = [];
@@ -187,25 +164,34 @@ export async function POST(req: NextRequest) {
       const arrayBuf = await f.arrayBuffer();
       const buf = Buffer.from(arrayBuf);
       const text = await bufferToText(f.name, buf);
+      const charCount = (text || "").trim().length;
+
+      let notes = "";
+      if (charCount < 80) {
+        if (f.name.toLowerCase().endsWith(".pdf")) {
+          notes = "No extractable text — likely a scanned/image PDF. Use a text PDF/DOCX/TXT or enable OCR.";
+        } else {
+          notes = "Very little text extracted. Please upload a text-based file.";
+        }
+      }
 
       const s = scoreResume(jdText, text || "");
-      results.push({ filename: f.name, ...s });
+      results.push({
+        filename: f.name,
+        ...s,
+        notes,
+        charCount
+      });
     }
 
     results.sort((a, b) => b.score - a.score);
     return NextResponse.json({ results });
   } catch (err: any) {
-    return NextResponse.json(
-      { error: err?.message || "Unexpected error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err?.message || "Unexpected error" }, { status: 500 });
   }
 }
 
-/** GET: simple health check so /api/score works in the browser */
+/** GET health check so visiting /api/score works in a browser */
 export async function GET() {
-  return new Response("score API OK", {
-    status: 200,
-    headers: { "Content-Type": "text/plain" },
-  });
+  return new Response("score API OK", { status: 200, headers: { "Content-Type": "text/plain" } });
 }
