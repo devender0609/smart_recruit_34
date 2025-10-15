@@ -1,7 +1,5 @@
 {
   "version": 2,
-  "buildCommand": "next build",
-  "outputDirectory": ".next",
   "functions": {
     "app/api/**/route.{js,ts}": {
       "runtime": "nodejs20.x",
